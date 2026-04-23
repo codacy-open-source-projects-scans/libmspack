@@ -123,8 +123,14 @@ static struct noned_state *noned_init(
   struct mspack_system *sys, struct mspack_file *in, struct mspack_file *out,
   int bufsize);
 
+static int mszipd_decompress_wrapper(
+  void *state, off_t bytes);
+static int lzxd_decompress_wrapper(
+  void *state, off_t bytes);
+static int qtmd_decompress_wrapper(
+  void *state, off_t bytes);
 static int noned_decompress(
-  struct noned_state *s, off_t bytes);
+  void *state, off_t bytes);
 static void noned_free(
   struct noned_state *state);
 
@@ -461,21 +467,31 @@ static int cabd_read_headers(struct mspack_system *sys,
     if (salvage && cfhead_file_offset < (off_t) cab->base.length) {
       if (!sys->seek(fh, cfhead_file_offset + cab->base.base_offset, MSPACK_SYS_SEEK_START)) {
         /* save the existing list of files (if any), they are overwritten */
-        struct mscabd_file *forig = cab->base.files;
+        struct mscabd_file *f1 = cab->base.files;
         int err2 = cabd_read_files(sys, fh, cab, fol, num_folders, num_files, salvage);
+        struct mscabd_file *f2 = cab->base.files;
         /* combine both lists of files */
-        if (forig) {
-           struct mscabd_file *fend = forig;
-           while (fend->next) fend = fend->next;
-           fend->next = cab->base.files;
-           cab->base.files = forig;
+        if (f1 && f1 != f2) {
+           struct mscabd_file *f1end = f1;
+           while (f1end->next) f1end = f1end->next;
+           f1end->next = f2;
+           cab->base.files = f1;
         }
         /* combine both cabd_read_files() errors */
-        err = err || err2;
+        err = err ? err : err2;
       }
     }
   }
-  if (err) return err;
+
+  /* ignore errors if salvage mode finds files */
+  if (err) {
+    if (salvage && cab->base.files) {
+      if (!quiet) sys->message(fh, "WARNING; ignoring error %d while salvaging", err);
+    }
+    else {
+      return err;
+    }
+  }
 
   if (cab->base.files == NULL) {
     /* We never actually added any files to the file list.  Something went wrong.
@@ -787,7 +803,7 @@ static int cabd_find(struct mscab_decompressor_p *self, unsigned char *buf,
             return MSPACK_ERR_NOMEMORY;
           }
           cab->base.filename = filename;
-          if (cabd_read_headers(sys, fh, cab, caboff, self->salvage, 1)) {
+          if (cabd_read_headers(sys, fh, cab, caboff, self->salvage, caboff > 0)) {
             /* destroy the failed cabinet */
             cabd_close((struct mscab_decompressor *) self,
                        (struct mscabd_cabinet *) cab);
@@ -1215,21 +1231,21 @@ static int cabd_init_decomp(struct mscab_decompressor_p *self, unsigned int ct)
 
   switch (ct & cffoldCOMPTYPE_MASK) {
   case cffoldCOMPTYPE_NONE:
-    self->d->decompress = (int (*)(void *, off_t)) &noned_decompress;
+    self->d->decompress = &noned_decompress;
     self->d->state = noned_init(&self->d->sys, fh, fh, self->buf_size);
     break;
   case cffoldCOMPTYPE_MSZIP:
-    self->d->decompress = (int (*)(void *, off_t)) &mszipd_decompress;
+    self->d->decompress = &mszipd_decompress_wrapper;
     self->d->state = mszipd_init(&self->d->sys, fh, fh, self->buf_size,
                                  self->fix_mszip);
     break;
   case cffoldCOMPTYPE_QUANTUM:
-    self->d->decompress = (int (*)(void *, off_t)) &qtmd_decompress;
+    self->d->decompress = &qtmd_decompress_wrapper;
     self->d->state = qtmd_init(&self->d->sys, fh, fh, (int) (ct >> 8) & 0x1f,
                                self->buf_size);
     break;
   case cffoldCOMPTYPE_LZX:
-    self->d->decompress = (int (*)(void *, off_t)) &lzxd_decompress;
+    self->d->decompress = &lzxd_decompress_wrapper;
     self->d->state = lzxd_init(&self->d->sys, fh, fh, (int) (ct >> 8) & 0x1f, 0,
                                self->buf_size, (off_t)0,0);
     break;
@@ -1463,6 +1479,22 @@ static unsigned int cabd_checksum(unsigned char *data, unsigned int bytes,
 }
 
 /***************************************
+ * {MSZIP,LZX,QTM}D_DECOMPRESS_WRAPPER
+ ***************************************
+ * UBSan complains about calling a function like int foo(struct foo*, off_t)
+ * through a pointer like (int (*)(void *, off_t)) so do it indirectly
+ */
+static int mszipd_decompress_wrapper(void *state, off_t bytes) {
+  return mszipd_decompress((struct mszipd_stream *)state, bytes);
+}
+static int lzxd_decompress_wrapper(void *state, off_t bytes) {
+  return lzxd_decompress((struct lzxd_stream *)state, bytes);
+}
+static int qtmd_decompress_wrapper(void *state, off_t bytes) {
+  return qtmd_decompress((struct qtmd_stream *)state, bytes);
+}
+
+/***************************************
  * NONED_INIT, NONED_DECOMPRESS, NONED_FREE
  ***************************************
  * the "not compressed" method decompressor
@@ -1497,7 +1529,8 @@ static struct noned_state *noned_init(struct mspack_system *sys,
   return state;
 }
 
-static int noned_decompress(struct noned_state *s, off_t bytes) {
+static int noned_decompress(void *state, off_t bytes) {
+  struct noned_state *s = (struct noned_state *) state;
   int run;
   while (bytes > 0) {
     run = (bytes > s->bufsize) ? s->bufsize : (int) bytes;
