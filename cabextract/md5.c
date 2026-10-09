@@ -227,11 +227,11 @@ md5_process_bytes ( const void *buffer, size_t len, struct md5_ctx *ctx)
 
       if (ctx->buflen > 64)
         {
-          md5_process_block (ctx->buffer, ctx->buflen & ~63, ctx);
+          md5_process_block (ctx->buffer, ctx->buflen & ~63U, ctx);
 
           ctx->buflen &= 63;
           /* The regions in the following copy operation cannot overlap.  */
-          memcpy (ctx->buffer, &ctx->buffer[(left_over + add) & ~63],
+          memcpy (ctx->buffer, &ctx->buffer[(left_over + add) & ~63U],
                   ctx->buflen);
         }
 
@@ -261,8 +261,8 @@ md5_process_bytes ( const void *buffer, size_t len, struct md5_ctx *ctx)
       else
 #endif
         {
-          md5_process_block (buffer, len & ~63, ctx);
-          buffer = (const char *) buffer + (len & ~63);
+          md5_process_block (buffer, len & ~63U, ctx);
+          buffer = (const char *) buffer + (len & ~63U);
           len &= 63;
         }
     }
@@ -278,6 +278,7 @@ md5_process_bytes ( const void *buffer, size_t len, struct md5_ctx *ctx)
         {
           md5_process_block (ctx->buffer, 64, ctx);
           left_over -= 64;
+          /* coverity[overlapping_buffer] */
           memcpy (ctx->buffer, &ctx->buffer[64], left_over);
         }
       ctx->buflen = left_over;
